@@ -1,0 +1,26 @@
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+import tailwindcss from '@tailwindcss/vite'
+
+// Optics India POS v2.0 - Vite Configuration
+export default defineConfig({
+  plugins: [
+    react(),
+    tailwindcss()
+  ],
+  base: "/optical-frontend/",
+  build: {
+    chunkSizeWarningLimit: 1600,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes('node_modules')) {
+            if (id.includes('xlsx')) return 'xlsx';
+            if (id.includes('lucide-react')) return 'icons';
+            if (id.includes('react-dom') || id.includes('react-router') || id.includes('/react/')) return 'vendor-react';
+          }
+        }
+      }
+    }
+  }
+})

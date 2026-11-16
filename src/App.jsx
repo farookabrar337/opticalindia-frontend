@@ -1,0 +1,1026 @@
+import React, { useState, useEffect, useCallback, useMemo, Suspense, lazy } from 'react';
+import { HashRouter, Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
+import axios from 'axios';
+import Header from './components/Header';
+import Sidebar from './components/Sidebar';
+import CustomerPrescriptionForm from './components/CustomerPrescriptionForm';
+import QuickSearchGrid from './components/QuickSearchGrid';
+import ActionBar from './components/ActionBar';
+import DashboardPage from './components/DashboardPage';
+import LoginPage from './components/LoginPage';
+import DeliveryModal from './components/DeliveryModal';
+import { BILLS_API as API_BASE } from './config/api';
+import { formatBillNo, getNextSequentialBillNo } from './utils/billNumber';
+
+// Lazy load secondary heavy pages and modals for optimal bundle splitting
+const RemindersPage = lazy(() => import('./components/RemindersPage'));
+const FollowUpPage = lazy(() => import('./components/FollowUpPage'));
+const WalletPage = lazy(() => import('./components/WalletPage'));
+const ReportsPage = lazy(() => import('./components/ReportsPage'));
+const CustomerInfoPage = lazy(() => import('./components/CustomerInfoPage'));
+const StaffSetupPage = lazy(() => import('./components/StaffSetupPage'));
+const InvoicePrintModal = lazy(() => import('./components/InvoicePrintModal'));
+const ItemSetupModal = lazy(() => import('./components/ItemSetupModal'));
+
+// Sleek loading fallback for lazy-loaded route chunks
+const PageLoadingFallback = () => (
+  <div className="flex-1 flex items-center justify-center p-16">
+    <div className="flex items-center gap-2.5 text-xs font-bold text-[#0B2D5B] dark:text-[#D4AF37] animate-pulse">
+      <div className="w-4 h-4 rounded-full border-2 border-current border-t-transparent animate-spin" />
+      <span>Loading module...</span>
+    </div>
+  </div>
+);
+
+const defaultFormState = {
+  billNo: '',
+  entryType: 'New',
+  branch: 'Optics India',
+  date: new Date().toISOString().substring(0, 10),
+  customer: {
+    mrdNo: '',
+    name: '',
+    phone: '',
+    address: '',
+    age: '',
+    gender: '',
+    drName: '',
+    orderTakenBy: '',
+    note: ''
+  },
+  prescription: {
+    rightEye: { sph: '', cyl: '-', axis: '-', add: '-', va: '' },
+    leftEye: { sph: '', cyl: '-', axis: '-', add: '-', va: '' },
+    pd: '',
+    ri: ''
+  },
+  lens: { type: '', coating: '', brand: '', warranty: '', qty: '', price: '' },
+  frame: { type: '', brand: '', warranty: '', qty: '', price: '' },
+  totalAmount: 0,
+  discountAmount: '',
+  referralDiscount: 0,
+  referrerMrd: '',
+  referrerPhone: '',
+  walletRedeemed: 0,
+  cashbackEarned: 0,
+  netAmount: 0,
+  payMode: 'CASH',
+  onlinePayAmount: '',
+  advanceAmount: '',
+  balanceAmount: 0,
+  deliveryDate: new Date().toISOString().substring(0, 10),
+  reminderDate: new Date().toISOString().substring(0, 10),
+  deliveryStatus: 'Pending'
+};
+
+function AppContent() {
+  const [bills, setBills] = useState([]);
+  const [formData, setFormData] = useState(defaultFormState);
+  const [activeBillId, setActiveBillId] = useState(null);
+  const [isEditing, setIsEditing] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [isOnline, setIsOnline] = useState(false);
+  const [isDarkMode, setIsDarkMode] = useState(false);
+  const [toastMessage, setToastMessage] = useState(null);
+
+  const location = useLocation();
+  const navigate = useNavigate();
+
+  // Current active view calculated from current route hash
+  const currentPath = location.pathname.replace(/^\//, '');
+  const currentView = currentPath || 'dashboard';
+
+  // Handle direct navigation to /optics-admin without hash
+  useEffect(() => {
+    if (window.location.pathname.includes('optics-admin') && !window.location.hash.includes('optics-admin')) {
+      navigate('/optics-admin', { replace: true });
+    }
+  }, [navigate]);
+
+  // Authentication State
+  const [currentUser, setCurrentUser] = useState(() => {
+    try {
+      const saved = localStorage.getItem('optics_current_user');
+      if (!saved) return null;
+      const parsed = JSON.parse(saved);
+      if (parsed && !parsed.branch) {
+        parsed.branch = parsed.role === 'admin' ? 'All' : 'Optics India';
+      }
+      return parsed;
+    } catch {
+      return null;
+    }
+  });
+
+  const [registeredStaff, setRegisteredStaff] = useState(() => {
+    try {
+      const saved = localStorage.getItem('optics_registered_staff');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  // Branch Locations State (Defaults: Optics India, Ayncare + custom branches added by admin)
+  const [branches, setBranches] = useState(() => {
+    try {
+      const saved = localStorage.getItem('optics_branches');
+      const base = ['Optics India', 'Ayncare'];
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          const uniqueList = [...base];
+          parsed.forEach(item => {
+            if (typeof item === 'string' && item.trim()) {
+              const clean = item.trim();
+              if (!uniqueList.some(b => b.toLowerCase() === clean.toLowerCase())) {
+                uniqueList.push(clean);
+              }
+            }
+          });
+          try {
+            localStorage.setItem('optics_branches', JSON.stringify(uniqueList));
+          } catch {}
+          return uniqueList;
+        }
+      }
+      return base;
+    } catch {
+      return ['Optics India', 'Ayncare'];
+    }
+  });
+
+  const handleAddBranch = (branchName) => {
+    if (!branchName || !branchName.trim()) return false;
+    const trimmed = branchName.trim();
+    if (branches.some(b => b.toLowerCase() === trimmed.toLowerCase())) {
+      showNotification(`Branch "${trimmed}" already exists.`, 'info');
+      return false;
+    }
+    const updated = [...branches, trimmed];
+    setBranches(updated);
+    try {
+      localStorage.setItem('optics_branches', JSON.stringify(updated));
+    } catch (e) {
+      console.warn('Could not save branches to localStorage', e);
+    }
+    showNotification(`Branch "${trimmed}" created successfully!`, 'success');
+    return true;
+  };
+
+  const handleEditBranch = (oldBranchName, newBranchName) => {
+    if (!oldBranchName || !newBranchName) return false;
+    const cleanOld = oldBranchName.trim();
+    const cleanNew = newBranchName.trim();
+
+    if (!cleanNew) {
+      showNotification('Branch name cannot be empty.', 'error');
+      return false;
+    }
+
+    if (cleanOld.toLowerCase() === cleanNew.toLowerCase()) {
+      if (cleanOld === cleanNew) return true;
+    } else {
+      if (branches.some(b => b.toLowerCase() === cleanNew.toLowerCase())) {
+        showNotification(`Branch "${cleanNew}" already exists.`, 'error');
+        return false;
+      }
+    }
+
+    // 1. Update branches array
+    const updatedBranches = branches.map(b => b.toLowerCase() === cleanOld.toLowerCase() ? cleanNew : b);
+    setBranches(updatedBranches);
+    try {
+      localStorage.setItem('optics_branches', JSON.stringify(updatedBranches));
+    } catch (e) {
+      console.warn('Could not save branches to localStorage', e);
+    }
+
+    // 2. Update staff members assigned to this branch
+    setRegisteredStaff(prev => {
+      let changed = false;
+      const updated = prev.map(s => {
+        if ((s.branch || 'Optics India').toLowerCase() === cleanOld.toLowerCase()) {
+          changed = true;
+          return { ...s, branch: cleanNew };
+        }
+        return s;
+      });
+      if (changed) {
+        try {
+          localStorage.setItem('optics_registered_staff', JSON.stringify(updated));
+        } catch (e) {}
+      }
+      return updated;
+    });
+
+    // 3. Update active bills in state
+    setBills(prev => prev.map(bill => {
+      if ((bill.branch || 'Optics India').toLowerCase() === cleanOld.toLowerCase()) {
+        return { ...bill, branch: cleanNew };
+      }
+      return bill;
+    }));
+
+    // 4. Update current logged-in user if assigned to this branch
+    if (currentUser && (currentUser.branch || '').toLowerCase() === cleanOld.toLowerCase()) {
+      const updatedUser = { ...currentUser, branch: cleanNew };
+      setCurrentUser(updatedUser);
+      try {
+        localStorage.setItem('optics_current_user', JSON.stringify(updatedUser));
+      } catch (e) {}
+    }
+
+    showNotification(`Branch "${cleanOld}" updated to "${cleanNew}" successfully!`, 'success');
+    return true;
+  };
+
+  const handleDeleteBranch = (branchToDelete) => {
+    if (!branchToDelete) return false;
+    const cleanTarget = branchToDelete.trim();
+
+    if (cleanTarget.toLowerCase() === 'optics india') {
+      showNotification('Primary branch "Optics India" cannot be deleted.', 'error');
+      return false;
+    }
+
+    if (branches.length <= 1) {
+      showNotification('At least one store branch must remain active.', 'error');
+      return false;
+    }
+
+    // 1. Remove branch from array
+    const updatedBranches = branches.filter(b => b.toLowerCase() !== cleanTarget.toLowerCase());
+    setBranches(updatedBranches);
+    try {
+      localStorage.setItem('optics_branches', JSON.stringify(updatedBranches));
+    } catch (e) {
+      console.warn('Could not save branches to localStorage', e);
+    }
+
+    // 2. Fallback branch: default to 'Optics India' or first remaining branch
+    const fallbackBranch = updatedBranches.find(b => b.toLowerCase() === 'optics india') || updatedBranches[0] || 'Optics India';
+
+    // 3. Reassign staff members from deleted branch
+    setRegisteredStaff(prev => {
+      let changed = false;
+      const updated = prev.map(s => {
+        if ((s.branch || '').toLowerCase() === cleanTarget.toLowerCase()) {
+          changed = true;
+          return { ...s, branch: fallbackBranch };
+        }
+        return s;
+      });
+      if (changed) {
+        try {
+          localStorage.setItem('optics_registered_staff', JSON.stringify(updated));
+        } catch (e) {}
+      }
+      return updated;
+    });
+
+    // 4. Reassign active bills in state
+    setBills(prev => prev.map(bill => {
+      if ((bill.branch || '').toLowerCase() === cleanTarget.toLowerCase()) {
+        return { ...bill, branch: fallbackBranch };
+      }
+      return bill;
+    }));
+
+    // 5. Update current logged-in user if assigned to this deleted branch
+    if (currentUser && (currentUser.branch || '').toLowerCase() === cleanTarget.toLowerCase()) {
+      const updatedUser = { ...currentUser, branch: fallbackBranch };
+      setCurrentUser(updatedUser);
+      try {
+        localStorage.setItem('optics_current_user', JSON.stringify(updatedUser));
+      } catch (e) {}
+    }
+
+    showNotification(`Branch "${cleanTarget}" deleted successfully. Any staff were reassigned to ${fallbackBranch}.`, 'info');
+    return true;
+  };
+
+  const handleLoginSuccess = (user) => {
+    const sanitizedUser = {
+      ...user,
+      branch: user.role === 'admin' ? (user.branch || 'All') : (user.branch || 'Optics India').trim()
+    };
+    setCurrentUser(sanitizedUser);
+    localStorage.setItem('optics_current_user', JSON.stringify(sanitizedUser));
+    showNotification(`Welcome, ${sanitizedUser.name || sanitizedUser.role}! Logged in successfully.`, 'success');
+    navigate('/dashboard');
+  };
+
+  const handleLogout = () => {
+    const wasAdmin = currentUser?.role === 'admin';
+    setCurrentUser(null);
+    localStorage.removeItem('optics_current_user');
+    showNotification('Logged out successfully.', 'info');
+    navigate(wasAdmin ? '/optics-admin' : '/login');
+  };
+
+  const handleAddStaff = (newStaff) => {
+    setRegisteredStaff(prev => {
+      const updated = [...prev, newStaff];
+      localStorage.setItem('optics_registered_staff', JSON.stringify(updated));
+      return updated;
+    });
+  };
+
+  const handleDeleteStaff = (staffId) => {
+    setRegisteredStaff(prev => {
+      const updated = prev.filter(s => s.id !== staffId);
+      localStorage.setItem('optics_registered_staff', JSON.stringify(updated));
+      return updated;
+    });
+    showNotification('Staff member removed.', 'info');
+  };
+
+  const handleUpdateStaff = (updatedStaff) => {
+    setRegisteredStaff(prev => {
+      const updated = prev.map(s => s.id === updatedStaff.id ? updatedStaff : s);
+      localStorage.setItem('optics_registered_staff', JSON.stringify(updated));
+      return updated;
+    });
+    showNotification(`Staff profile for "${updatedStaff.name}" updated successfully.`, 'success');
+  };
+  
+  // Search Panel Slide-out / Collapsible state
+  const [isSearchPanelOpen, setIsSearchPanelOpen] = useState(false);
+
+  // Mobile menu drawer state
+  const [isMobileOpen, setIsMobileOpen] = useState(false);
+
+  // Modals state
+  const [showPrintModal, setShowPrintModal] = useState(false);
+  const [isDuplicateBill, setIsDuplicateBill] = useState(false);
+  const [showItemSetupModal, setShowItemSetupModal] = useState(false);
+  const [showDeliveryModal, setShowDeliveryModal] = useState(false);
+
+  const showNotification = (msg, type = 'info') => {
+    setToastMessage({ text: msg, type });
+    setTimeout(() => setToastMessage(null), 3500);
+  };
+
+  const handleToggleSearch = () => {
+    setIsSearchPanelOpen(prev => {
+      const newState = !prev;
+      if (newState) {
+        setTimeout(() => {
+          const el = document.getElementById('search-panel-container');
+          if (el) el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }, 100);
+      }
+      return newState;
+    });
+  };
+
+  const handleSelectBillAndClose = (billRecord) => {
+    handleSelectBill(billRecord);
+    setIsSearchPanelOpen(false);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    showNotification(`Bill #${formatBillNo(billRecord.billNo)} loaded into form.`, 'success');
+  };
+
+  // Current session user role and assigned branch
+  const userRole = currentUser?.role || 'salesperson';
+  const userBranch = (currentUser?.branch || 'Optics India').trim();
+
+  // Strict branch data access control:
+  // Admin can see all branches.
+  // Employee / Salesperson can strictly and exclusively see ONLY their assigned branch.
+  const accessibleBills = useMemo(() => {
+    if (!currentUser || currentUser.role === 'admin') {
+      return bills;
+    }
+    const target = (currentUser.branch || 'Optics India').toLowerCase();
+    return bills.filter(b => (b.branch || 'Optics India').toLowerCase() === target);
+  }, [bills, currentUser]);
+
+  const fetchBills = useCallback(async (query = '') => {
+    try {
+      let url = `${API_BASE}?query=${encodeURIComponent(query)}`;
+      if (currentUser && currentUser.role !== 'admin' && currentUser.branch) {
+        url += `&branch=${encodeURIComponent(currentUser.branch)}`;
+      }
+      const res = await axios.get(url);
+      const fetchedBills = res.data || [];
+      setBills(fetchedBills);
+      setIsOnline(true);
+      return fetchedBills;
+    } catch {
+      console.warn('Backend server offline or unreachable, using local state persistence.');
+      setIsOnline(false);
+      return [];
+    }
+  }, [currentUser]);
+
+  const resetFormFields = useCallback((currentBills = accessibleBills) => {
+    setActiveBillId(null);
+    setIsEditing(false);
+    const nextBillNo = getNextSequentialBillNo(currentBills);
+    const assignedBranch = currentUser?.role === 'admin' 
+      ? (formData.branch || 'Optics India') 
+      : (currentUser?.branch || 'Optics India');
+
+    setFormData({
+      ...defaultFormState,
+      billNo: nextBillNo,
+      branch: assignedBranch,
+      customer: {
+        ...defaultFormState.customer,
+        gender: ''
+      }
+    });
+  }, [accessibleBills, currentUser, formData.branch]);
+
+  useEffect(() => {
+    let isMounted = true;
+    const initBills = async () => {
+      const fetched = await fetchBills();
+      if (!isMounted) return;
+      const nextNo = getNextSequentialBillNo(fetched);
+      setFormData(prev => ({
+        ...prev,
+        billNo: prev.billNo ? formatBillNo(prev.billNo) : nextNo,
+        branch: currentUser?.role === 'admin' ? (prev.branch || 'Optics India') : (currentUser?.branch || 'Optics India')
+      }));
+    };
+    initBills();
+    return () => { isMounted = false; };
+  }, [fetchBills, currentUser]);
+
+  const handleNew = () => {
+    resetFormFields(accessibleBills);
+    showNotification('Form reset. Next continuous bill number assigned.', 'info');
+  };
+
+  const handleSave = async () => {
+    if (!formData.customer.name.trim() || !formData.customer.phone.trim()) {
+      showNotification('Please provide Customer Name and Phone number.', 'error');
+      return;
+    }
+
+    let savedBillNo = formData.billNo ? formatBillNo(formData.billNo) : getNextSequentialBillNo(accessibleBills);
+    const customerName = formData.customer.name;
+    const assignedBranch = currentUser?.role === 'admin' 
+      ? (formData.branch || 'Optics India') 
+      : (currentUser?.branch || 'Optics India');
+    const savePayload = { ...formData, billNo: savedBillNo, branch: assignedBranch };
+
+    try {
+      if (isEditing && activeBillId) {
+        await axios.put(`${API_BASE}/${activeBillId}`, savePayload);
+      } else {
+        const res = await axios.post(API_BASE, savePayload);
+        if (res.data?.billNo) {
+          savedBillNo = formatBillNo(res.data.billNo);
+        }
+      }
+      const updatedList = await fetchBills();
+      resetFormFields(updatedList);
+      showNotification(`Customer "${customerName}" info & Bill #${savedBillNo} saved successfully!`, 'success');
+    } catch {
+      const existingIdx = bills.findIndex(b => String(b.billNo) === String(formData.billNo));
+      let updatedList;
+      if (existingIdx >= 0) {
+        updatedList = [...bills];
+        updatedList[existingIdx] = { ...savePayload, _id: bills[existingIdx]._id };
+        setBills(updatedList);
+      } else {
+        const newRecord = { ...savePayload, _id: 'bill_' + Date.now() };
+        updatedList = [newRecord, ...bills];
+        setBills(updatedList);
+      }
+      resetFormFields(updatedList);
+      showNotification(`Customer "${customerName}" info & Bill #${savedBillNo} saved successfully!`, 'success');
+    }
+  };
+
+  const handleEdit = () => {
+    if (!activeBillId) {
+      showNotification('Please select a bill record from the table to edit.', 'warning');
+      return;
+    }
+    setIsEditing(true);
+    showNotification(`Editing enabled for Bill #${formatBillNo(formData.billNo)}`, 'info');
+  };
+
+  const handleDelete = async () => {
+    if (!activeBillId) {
+      showNotification('Please select a bill record from the table to delete.', 'warning');
+      return;
+    }
+
+    if (window.confirm(`Are you sure you want to delete Bill #${formatBillNo(formData.billNo)}?`)) {
+      try {
+        await axios.delete(`${API_BASE}/${activeBillId}`);
+        showNotification(`Bill #${formatBillNo(formData.billNo)} deleted.`, 'success');
+      } catch {
+        setBills(bills.filter(b => b._id !== activeBillId && String(b.billNo) !== String(formData.billNo)));
+        showNotification(`Bill #${formatBillNo(formData.billNo)} removed locally.`, 'success');
+      }
+      fetchBills();
+      handleNew();
+    }
+  };
+
+  const handleView = () => {
+    setIsDuplicateBill(false);
+    setShowPrintModal(true);
+  };
+
+  const handleDuplicateBill = () => {
+    setIsDuplicateBill(true);
+    setShowPrintModal(true);
+  };
+
+  const handleDeliveryToggle = async () => {
+    if (!activeBillId) {
+      showNotification('Please select a bill record from the table to toggle delivery status.', 'warning');
+      return;
+    }
+
+    const targetBill = bills.find(b => b._id === activeBillId || b.billNo === activeBillId) || formData;
+    if ((targetBill.deliveryStatus || 'Pending') !== 'Delivered') {
+      setShowDeliveryModal(true);
+    } else {
+      if (window.confirm(`Are you sure you want to move Order #${formatBillNo(targetBill.billNo)} back to Pending Delivery?`)) {
+        await handleDeliveryToggleById(activeBillId, 'Pending');
+      }
+    }
+  };
+
+  const handleDeliveryToggleById = async (targetId, forcedStatus = null) => {
+    const targetBill = bills.find(b => b._id === targetId || String(b.billNo) === String(targetId));
+    const currentStatus = targetBill?.deliveryStatus || 'Pending';
+
+    let payload = {};
+    if (typeof forcedStatus === 'object' && forcedStatus !== null) {
+      payload = { ...forcedStatus };
+      if (!payload.status) {
+        payload.status = currentStatus === 'Delivered' ? 'Pending' : 'Delivered';
+      }
+    } else if (typeof forcedStatus === 'string') {
+      payload = { status: forcedStatus };
+    } else {
+      payload = { status: currentStatus === 'Delivered' ? 'Pending' : 'Delivered' };
+    }
+
+    const effectiveId = targetBill?._id || targetId;
+
+    try {
+      await axios.patch(`${API_BASE}/${effectiveId}/delivery`, payload);
+      const balInfo = payload.deliveryAmount !== undefined && Number(payload.deliveryAmount) > 0 ? ` (Balance ₹${Number(payload.deliveryAmount).toFixed(2)} settled)` : '';
+      showNotification(`Order #${formatBillNo(targetBill?.billNo || targetId)} marked as "${payload.status}"${balInfo}`, 'success');
+    } catch (err) {
+      console.warn('Network issue updating delivery status, updating locally.', err);
+      const balInfo = payload.deliveryAmount !== undefined && Number(payload.deliveryAmount) > 0 ? ` (Balance ₹${Number(payload.deliveryAmount).toFixed(2)} settled)` : '';
+      showNotification(`Order #${formatBillNo(targetBill?.billNo || targetId)} marked as "${payload.status}"${balInfo} (local)`, 'info');
+    }
+
+    setBills(prev => prev.map(b => 
+      (b._id === targetId || String(b.billNo) === String(targetId) || (targetBill?._id && b._id === targetBill._id)) 
+        ? { ...b, ...payload, deliveryStatus: payload.status } 
+        : b
+    ));
+
+    if (activeBillId === targetId || formData._id === targetId || String(formData.billNo) === String(targetId)) {
+      setFormData(prev => ({
+        ...prev,
+        ...payload,
+        deliveryStatus: payload.status
+      }));
+    }
+
+    await fetchBills();
+  };
+
+  const handleSendSMS = async (billRecord) => {
+    const targetId = billRecord._id || billRecord.billNo;
+    try {
+      await axios.post(`${API_BASE}/${targetId}/send-sms`);
+      showNotification(`SMS/WhatsApp notification sent to ${billRecord.customer?.name} (${billRecord.customer?.phone})`, 'success');
+    } catch {
+      showNotification(`SMS/WhatsApp notification triggered for ${billRecord.customer?.name}`, 'success');
+    }
+
+    setBills(prev => prev.map(b => 
+      (b._id === targetId || String(b.billNo) === String(targetId)) ? { ...b, smsSent: true } : b
+    ));
+  };
+
+  const handleToggleSMS = async (billRecord, forcedStatus = null) => {
+    const targetId = billRecord._id || billRecord.billNo;
+    const newStatus = forcedStatus !== null ? forcedStatus : !billRecord.smsSent;
+    try {
+      await axios.patch(`${API_BASE}/${targetId}/toggle-sms`, { sent: newStatus });
+      showNotification(newStatus ? `Reminder marked as Sent for Bill #${formatBillNo(billRecord.billNo)}` : `Reminder marked as Pending for Bill #${formatBillNo(billRecord.billNo)}`, 'success');
+    } catch {
+      console.warn('Network issue toggling SMS status, updated locally.');
+      showNotification(`Reminder marked as ${newStatus ? 'Sent' : 'Pending'} (local)`, 'info');
+    }
+
+    setBills(prev => prev.map(b => 
+      (b._id === targetId || String(b.billNo) === String(targetId)) ? { ...b, smsSent: newStatus } : b
+    ));
+  };
+
+  const handleUpdateFollowUpStatus = async (targetId, status = 'Sent', type = null) => {
+    const targetBill = bills.find(b => b._id === targetId || String(b.billNo) === String(targetId));
+    try {
+      await axios.patch(`${API_BASE}/${targetId}/followup`, { status, type });
+      showNotification(`Follow-up for Bill #${formatBillNo(targetBill?.billNo || targetId)} marked as "${status}"`, 'success');
+    } catch {
+      console.warn('Network issue updating follow-up status, updated locally.');
+      showNotification(`Follow-up for Bill #${formatBillNo(targetBill?.billNo || targetId)} marked as "${status}" (local)`, 'info');
+    }
+
+    setBills(prev => prev.map(b => {
+      if (b._id === targetId || String(b.billNo) === String(targetId)) {
+        const details = { ...(b.followUpDetails || {}) };
+        const now = new Date().toISOString();
+        const isPending = status === 'Pending';
+        if (type === 'service') details.serviceSentAt = isPending ? null : now;
+        if (type === 'feedback') details.feedbackSentAt = isPending ? null : now;
+        if (type === 'eyecheck') details.eyeCheckSentAt = isPending ? null : now;
+        if (!isPending) details.lastContactedAt = now;
+
+        const anySent = Boolean(details.serviceSentAt || details.feedbackSentAt || details.eyeCheckSentAt);
+        const resolvedStatus = anySent ? 'Sent' : 'Pending';
+
+        return { ...b, followUpStatus: resolvedStatus, followUpDetails: details };
+      }
+      return b;
+    }));
+  };
+
+  const handleSelectBill = (billRecord) => {
+    // Branch boundary security: Non-admin staff cannot open or view records from other branches
+    if (currentUser && currentUser.role !== 'admin') {
+      const uBranch = (currentUser.branch || 'Optics India').toLowerCase();
+      const bBranch = (billRecord.branch || 'Optics India').toLowerCase();
+      if (bBranch !== uBranch) {
+        showNotification(`Access denied: Order #${formatBillNo(billRecord.billNo)} belongs to branch "${billRecord.branch || 'Optics India'}". You are only authorized to view ${currentUser.branch || 'Optics India'} records.`, 'error');
+        return;
+      }
+    }
+
+    setActiveBillId(billRecord._id || billRecord.billNo);
+    setIsEditing(false);
+
+    setFormData({
+      ...defaultFormState,
+      ...billRecord,
+      branch: billRecord.branch || (currentUser?.role === 'admin' ? 'Optics India' : (currentUser?.branch || 'Optics India')),
+      billNo: formatBillNo(billRecord.billNo),
+      date: billRecord.date ? billRecord.date.substring(0, 10) : new Date().toISOString().substring(0, 10),
+      deliveryDate: billRecord.deliveryDate ? billRecord.deliveryDate.substring(0, 10) : new Date().toISOString().substring(0, 10),
+      reminderDate: billRecord.reminderDate ? billRecord.reminderDate.substring(0, 10) : new Date().toISOString().substring(0, 10),
+      customer: {
+        ...defaultFormState.customer,
+        ...(billRecord.customer || {})
+      },
+      prescription: {
+        ...defaultFormState.prescription,
+        ...(billRecord.prescription || {})
+      },
+      lens: {
+        ...defaultFormState.lens,
+        ...(billRecord.lens || {})
+      },
+      frame: {
+        ...defaultFormState.frame,
+        ...(billRecord.frame || {})
+      },
+      totalAmount: billRecord.totalAmount !== undefined && billRecord.totalAmount !== null ? billRecord.totalAmount : 0,
+      discountAmount: billRecord.discountAmount || 0,
+      netAmount: billRecord.netAmount !== undefined && billRecord.netAmount !== null ? billRecord.netAmount : 0,
+      advanceAmount: billRecord.advanceAmount || 0,
+      balanceAmount: billRecord.balanceAmount || 0
+    });
+  };
+
+  const filteredBills = useMemo(() => {
+    if (!searchQuery || !searchQuery.trim()) return [];
+    const q = searchQuery.trim().toLowerCase();
+    const cleanNum = q.replace(/^0+/, '');
+
+    // Non-admin search is strictly scoped to accessibleBills (their own branch only)
+    return accessibleBills.filter(b => {
+      const nameMatch = b.customer?.name && b.customer.name.toLowerCase().includes(q);
+      const mrdNo = (b.customer?.mrdNo || '').toLowerCase().trim();
+      const cleanMrd = mrdNo.replace(/^0+/, '');
+      const mrdMatch = mrdNo.includes(q) || (cleanNum && cleanMrd === cleanNum);
+      const formattedBNo = formatBillNo(b.billNo).toLowerCase();
+      const rawBNo = String(b.billNo || '').toLowerCase();
+      const billNoMatch = rawBNo === q || rawBNo === cleanNum || rawBNo.includes(q) || formattedBNo.includes(q);
+      const phoneMatch = b.customer?.phone && (q.length >= 7 ? b.customer.phone.includes(q) : b.customer.phone === q);
+
+      return nameMatch || mrdMatch || billNoMatch || phoneMatch;
+    });
+  }, [accessibleBills, searchQuery]);
+
+  // Dedicated /login & /optics-admin Routes & Authentication Guard
+  const isAuthRoute = currentView === 'login' || currentView === 'optics-admin';
+
+  if (isAuthRoute || !currentUser) {
+    if (!currentUser && !isAuthRoute) {
+      return <Navigate to="/login" replace />;
+    }
+
+    if (currentUser && currentUser.role === 'admin' && isAuthRoute) {
+      return <Navigate to="/dashboard" replace />;
+    }
+
+    if (currentUser && currentUser.role === 'salesperson' && currentView === 'login') {
+      return <Navigate to="/dashboard" replace />;
+    }
+
+    return (
+      <LoginPage 
+        onLoginSuccess={handleLoginSuccess}
+        registeredStaff={registeredStaff}
+        isDarkMode={isDarkMode}
+        isAdminPortal={currentView === 'optics-admin'}
+      />
+    );
+  }
+
+  return (
+    <div className={`min-h-screen flex transition-colors duration-300 ${
+      isDarkMode ? 'aurora-bg-dark text-slate-100' : 'aurora-bg-light text-slate-900'
+    }`}>
+      {/* Toast Alert Banner */}
+      {toastMessage && (
+        <div className={`fixed top-16 right-6 z-50 px-4 py-3 rounded-2xl shadow-2xl border text-xs font-bold flex items-center gap-2 animate-bounce backdrop-blur-md ${
+          toastMessage.type === 'success' ? 'bg-[#0B2D5B]/95 border-[#D4AF37] text-[#D4AF37] shadow-xl shadow-[#0B2D5B]/40' :
+          toastMessage.type === 'error' ? 'bg-rose-950/90 border border-rose-500 text-rose-200 shadow-xl' :
+          toastMessage.type === 'warning' ? 'bg-amber-950/90 border border-[#D4AF37] text-amber-200 shadow-xl' :
+          'bg-[#0B2D5B]/95 border-[#D4AF37] text-[#D4AF37] shadow-xl shadow-[#0B2D5B]/40'
+        }`}>
+          <span>{toastMessage.text}</span>
+        </div>
+      )}
+
+      {/* Left Sidebar Navigation */}
+      <Sidebar 
+        currentView={currentView}
+        setCurrentView={(view) => navigate(`/${view}`)}
+        bills={accessibleBills}
+        isDarkMode={isDarkMode}
+        setIsDarkMode={setIsDarkMode}
+        isMobileOpen={isMobileOpen}
+        setIsMobileOpen={setIsMobileOpen}
+        userRole={currentUser.role}
+      />
+
+      {/* Main Content Area */}
+      <div className="flex flex-col flex-1 min-w-0 overflow-x-hidden">
+        <Header 
+          isOnline={isOnline} 
+          isDarkMode={isDarkMode} 
+          setIsDarkMode={setIsDarkMode} 
+          onToggleMobileMenu={() => setIsMobileOpen(prev => !prev)}
+          currentUser={currentUser}
+          onLogout={handleLogout}
+        />
+
+        {/* View Switch Router with Suspense */}
+        <div className="flex-1 flex flex-col justify-between">
+          <Suspense fallback={<PageLoadingFallback />}>
+            <Routes>
+              <Route path="/" element={<Navigate to="/dashboard" replace />} />
+              <Route path="/login" element={<Navigate to="/dashboard" replace />} />
+              <Route path="/optics-admin" element={<Navigate to="/dashboard" replace />} />
+              <Route 
+                path="/billing" 
+                element={
+                  <main className="p-4.5 flex-1 grid grid-cols-1 xl:grid-cols-12 gap-4.5 items-start max-w-[1920px] mx-auto w-full transition-all duration-300">
+                    {/* Left Column: Optical Form */}
+                    <div className={`${isSearchPanelOpen ? 'xl:col-span-7' : 'xl:col-span-12'} w-full transition-all duration-300`}>
+                      <CustomerPrescriptionForm 
+                        formData={formData}
+                        setFormData={setFormData}
+                        isEditing={isEditing}
+                        isDarkMode={isDarkMode}
+                        onToggleSearch={handleToggleSearch}
+                        isSearchPanelOpen={isSearchPanelOpen}
+                        userRole={userRole}
+                        userBranch={userBranch}
+                        bills={accessibleBills}
+                        branches={userRole === 'admin' ? branches : [userBranch]}
+                      />
+                    </div>
+
+                    {/* Right Column: Quick Search Grid */}
+                    {isSearchPanelOpen && (
+                      <div id="search-panel-container" className="xl:col-span-5 w-full h-full transition-all duration-300">
+                        <QuickSearchGrid 
+                          bills={filteredBills}
+                          activeBillId={activeBillId}
+                          onSelectBill={handleSelectBillAndClose}
+                          searchQuery={searchQuery}
+                          setSearchQuery={setSearchQuery}
+                          onClosePanel={() => setIsSearchPanelOpen(false)}
+                          isDarkMode={isDarkMode}
+                        />
+                      </div>
+                    )}
+                  </main>
+                } 
+              />
+
+              <Route 
+                path="/dashboard" 
+                element={
+                  <main className="flex-1 w-full">
+                    <DashboardPage 
+                      bills={accessibleBills}
+                      branches={userRole === 'admin' ? branches : [userBranch]}
+                      isDarkMode={isDarkMode}
+                      userRole={userRole}
+                      userBranch={userBranch}
+                      onNavigateToReminders={() => navigate('/reminders')}
+                      onNavigateToBilling={() => navigate('/billing')}
+                      onSelectBill={(b) => {
+                        handleSelectBill(b);
+                        navigate('/billing');
+                      }}
+                    />
+                  </main>
+                } 
+              />
+
+              <Route 
+                path="/reminders" 
+                element={
+                  <main className="flex-1 w-full">
+                    <RemindersPage 
+                      bills={accessibleBills}
+                      isDarkMode={isDarkMode}
+                      userRole={userRole}
+                      userBranch={userBranch}
+                      onToggleStatus={handleDeliveryToggleById}
+                      onSendSMS={handleSendSMS}
+                      onToggleSMS={handleToggleSMS}
+                    />
+                  </main>
+                } 
+              />
+
+              <Route 
+                path="/followup" 
+                element={
+                  <main className="flex-1 w-full p-4.5 max-w-[1920px] mx-auto">
+                    <FollowUpPage 
+                      bills={accessibleBills}
+                      branches={userRole === 'admin' ? branches : [userBranch]}
+                      isDarkMode={isDarkMode}
+                      userRole={userRole}
+                      userBranch={userBranch}
+                      onUpdateBillStatus={handleUpdateFollowUpStatus}
+                    />
+                  </main>
+                } 
+              />
+
+              {/* Wallet & Loyalty Hub */}
+              <Route 
+                path="/wallet" 
+                element={
+                  <main className="flex-1 w-full p-4.5 max-w-[1920px] mx-auto">
+                    <WalletPage 
+                      bills={accessibleBills}
+                      isDarkMode={isDarkMode}
+                    />
+                  </main>
+                } 
+              />
+
+              {/* Admin Exclusive Views */}
+              <Route 
+                path="/reports" 
+                element={
+                  currentUser.role === 'admin' ? (
+                    <main className="flex-1 w-full p-4.5 max-w-[1920px] mx-auto">
+                      <ReportsPage 
+                        bills={bills}
+                        branches={branches}
+                        isDarkMode={isDarkMode}
+                      />
+                    </main>
+                  ) : (
+                    <Navigate to="/billing" replace />
+                  )
+                } 
+              />
+
+              <Route 
+                path="/customers" 
+                element={
+                  currentUser.role === 'admin' ? (
+                    <main className="flex-1 w-full p-4.5 max-w-[1920px] mx-auto">
+                      <CustomerInfoPage 
+                        bills={bills}
+                        isDarkMode={isDarkMode}
+                      />
+                    </main>
+                  ) : (
+                    <Navigate to="/billing" replace />
+                  )
+                } 
+              />
+
+              <Route 
+                path="/staff" 
+                element={
+                  currentUser.role === 'admin' ? (
+                    <main className="flex-1 w-full p-4.5 max-w-[1920px] mx-auto">
+                      <StaffSetupPage 
+                        registeredStaff={registeredStaff}
+                        branches={branches}
+                        onAddBranch={handleAddBranch}
+                        onEditBranch={handleEditBranch}
+                        onDeleteBranch={handleDeleteBranch}
+                        onAddStaff={handleAddStaff}
+                        onDeleteStaff={handleDeleteStaff}
+                        onUpdateStaff={handleUpdateStaff}
+                        isDarkMode={isDarkMode}
+                      />
+                    </main>
+                  ) : (
+                    <Navigate to="/billing" replace />
+                  )
+                } 
+              />
+
+              {/* Fallback route */}
+              <Route path="*" element={<Navigate to="/billing" replace />} />
+            </Routes>
+          </Suspense>
+
+          {/* Bottom Floating Action Dock (Only visible in Billing POS view) */}
+          {currentView === 'billing' && (
+            <footer className="p-4 sticky bottom-0 z-20 pointer-events-none">
+              <div className="max-w-[1920px] mx-auto w-full pointer-events-auto">
+                <ActionBar 
+                  onNew={handleNew}
+                  onSave={handleSave}
+                  onEdit={handleEdit}
+                  onDelete={handleDelete}
+                  onView={handleView}
+                  onDelivery={handleDeliveryToggle}
+                  onDuplicateBill={handleDuplicateBill}
+                  onItemSetup={() => setShowItemSetupModal(true)}
+                  onToggleSearch={handleToggleSearch}
+                  isSearchPanelOpen={isSearchPanelOpen}
+                  isEditing={isEditing}
+                  isDarkMode={isDarkMode}
+                />
+              </div>
+            </footer>
+          )}
+        </div>
+      </div>
+
+      {/* Modals wrapped in Suspense for lazy chunks */}
+      <Suspense fallback={null}>
+        {showPrintModal && (
+          <InvoicePrintModal 
+            bill={formData}
+            isDuplicate={isDuplicateBill}
+            onClose={() => setShowPrintModal(false)}
+          />
+        )}
+
+        {showItemSetupModal && (
+          <ItemSetupModal 
+            onClose={() => setShowItemSetupModal(false)}
+            userRole={currentUser?.role || 'admin'}
+          />
+        )}
+      </Suspense>
+
+      {showDeliveryModal && (
+        <DeliveryModal
+          bill={bills.find(b => b._id === activeBillId || b.billNo === activeBillId) || formData}
+          isOpen={showDeliveryModal}
+          onClose={() => setShowDeliveryModal(false)}
+          onConfirmDelivery={(billId, settlementData) => {
+            handleDeliveryToggleById(billId, settlementData);
+          }}
+          isDarkMode={isDarkMode}
+        />
+      )}
+    </div>
+  );
+}
+
+export default function App() {
+  return (
+    <HashRouter>
+      <AppContent />
+    </HashRouter>
+  );
+}

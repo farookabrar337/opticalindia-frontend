@@ -1,0 +1,935 @@
+import React, { useState, useMemo } from 'react';
+import {
+  TrendingUp,
+  DollarSign,
+  PieChart,
+  BarChart3,
+  Calendar,
+  ShoppingBag,
+  AlertCircle,
+  Truck,
+  FileSpreadsheet,
+  Search,
+  RotateCcw,
+  CheckCircle2,
+  Clock,
+  Users,
+  Building2
+} from 'lucide-react';
+import { formatBillNo } from '../utils/billNumber';
+
+export default function ReportsPage({ 
+  bills = [], 
+  branches = ['Optics India', 'Ayncare'],
+  isDarkMode 
+}) {
+  // Use local calendar date (YYYY-MM-DD) to align with date picker and avoid timezone drift
+  const getTodayStr = () => {
+    const d = new Date();
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  };
+
+  // Default Start Date & End Date to the current date (Today)
+  const [startDate, setStartDate] = useState(getTodayStr);
+  const [endDate, setEndDate] = useState(getTodayStr);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [selectedBranch, setSelectedBranch] = useState('all');
+
+  // Extract YYYY-MM-DD from bill.date safely
+  const getBillDateStr = (bill) => {
+    const dVal = bill?.date || bill?.createdAt;
+    if (!dVal) return '';
+    if (typeof dVal === 'string') {
+      const trimmed = dVal.trim();
+      if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+        return trimmed;
+      }
+    }
+    try {
+      const d = new Date(dVal);
+      if (isNaN(d.getTime())) return typeof dVal === 'string' ? dVal.substring(0, 10) : '';
+      const year = d.getFullYear();
+      const month = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return `${year}-${month}-${day}`;
+    } catch {
+      return typeof dVal === 'string' ? dVal.substring(0, 10) : '';
+    }
+  };
+
+  const hasDateSelected = Boolean(startDate || endDate);
+
+  // Filter bills by Start Date, End Date, Branch, and optional Search
+  // If no date is selected, keep entries empty
+  const filteredBills = useMemo(() => {
+    if (!startDate && !endDate) {
+      return [];
+    }
+
+    return bills.filter(bill => {
+      // Branch filter
+      if (selectedBranch && selectedBranch !== 'all' && selectedBranch !== 'All') {
+        const bBranch = (bill.branch || 'Optics India').toLowerCase();
+        if (bBranch !== selectedBranch.toLowerCase()) return false;
+      }
+
+      const bDate = getBillDateStr(bill);
+      if (startDate && bDate && bDate < startDate) return false;
+      if (endDate && bDate && bDate > endDate) return false;
+
+      if (searchQuery && searchQuery.trim()) {
+        const q = searchQuery.toLowerCase().trim();
+        const bNo = formatBillNo(bill.billNo).toLowerCase();
+        const rawBNo = String(bill.billNo || '').toLowerCase();
+        const name = String(bill.customer?.name || '').toLowerCase();
+        const phone = String(bill.customer?.phone || '').toLowerCase();
+        const mrd = String(bill.customer?.mrdNo || '').toLowerCase();
+        if (!bNo.includes(q) && !rawBNo.includes(q) && !name.includes(q) && !phone.includes(q) && !mrd.includes(q)) {
+          return false;
+        }
+      }
+      return true;
+    });
+  }, [bills, startDate, endDate, selectedBranch, searchQuery]);
+
+  // Aggregate sales statistics based on filtered bills
+  const summaryMetrics = useMemo(() => {
+    let totalSale = 0;
+    let totalDelivery = 0;
+    let totalBalance = 0;
+
+    let cashTotal = 0;
+    let upiTotal = 0;
+    let cardTotal = 0;
+    let onlineTotal = 0;
+    let bankTotal = 0;
+
+    const lensTypeCounts = {};
+    const frameBrandCounts = {};
+
+    // activeBills is strictly tied to filteredBills when date or search is active,
+    // or empty array if user clears both dates, ensuring KPI cards always match the table exactly
+    const activeBills = hasDateSelected || (searchQuery && searchQuery.trim()) ? filteredBills : [];
+
+    // Check if any bill has explicit deliveryAmount field
+    const hasExplicitDeliveryAmount = activeBills.some(
+      b => b.deliveryAmount !== undefined && b.deliveryAmount !== null && b.deliveryAmount !== '' && Number(b.deliveryAmount) > 0
+    );
+
+    activeBills.forEach(bill => {
+      const net = Number(bill.netAmount ?? bill.totalAmount ?? 0);
+      const bal = Number(bill.balanceAmount ?? 0);
+      totalBalance += bal;
+
+      const isDelivered = (bill.deliveryStatus || '').toLowerCase() === 'delivered';
+
+      // Calculate delivery amount:
+      // When an order is delivered, the amount collected at delivery is the balance amount (or explicit deliveryAmount)
+      let delAmt = 0;
+      if (bill.deliveryAmount !== undefined && bill.deliveryAmount !== null && bill.deliveryAmount !== '' && Number(bill.deliveryAmount) > 0) {
+        delAmt = Number(bill.deliveryAmount);
+      } else if (isDelivered) {
+        delAmt = bal > 0 ? bal : Math.max(0, net - Number(bill.advanceAmount || 0));
+      }
+
+      if (isDelivered) {
+        totalDelivery += delAmt;
+        totalSale += Math.max(0, net - delAmt);
+      } else {
+        totalSale += net;
+      }
+
+      // Payment mode totals
+      const mode = (bill.payMode || 'CASH').toUpperCase();
+      if (mode === 'CASH') cashTotal += net;
+      else if (mode === 'UPI') upiTotal += net;
+      else if (mode === 'CARD') cardTotal += net;
+      else if (mode === 'ONLINE') onlineTotal += net;
+      else if (mode === 'BANK_TRANSFER') bankTotal += net;
+
+      // Lens counts (only if specified)
+      if (bill.lens?.type && bill.lens.type.trim()) {
+        const lType = bill.lens.type.trim();
+        lensTypeCounts[lType] = (lensTypeCounts[lType] || 0) + (Number(bill.lens?.qty) || 1);
+      }
+
+      // Frame brand counts (only if specified)
+      if (bill.frame?.brand && bill.frame.brand.trim()) {
+        const fBrand = bill.frame.brand.trim();
+        frameBrandCounts[fBrand] = (frameBrandCounts[fBrand] || 0) + (Number(bill.frame?.qty) || 1);
+      }
+    });
+
+    // Formula requested: Gross sales = total sale + delivery amount
+    const grossSales = totalSale + totalDelivery;
+
+    // Total Customer (unique customer count in active bills)
+    const uniqueCustomerCount = new Set(
+      activeBills.map(b => (b.customer?.phone || b.customer?.name || '').trim().toLowerCase()).filter(Boolean)
+    ).size;
+
+    // Total Delivery Count (count of delivered orders in active bills)
+    const totalDeliveryCount = activeBills.filter(b => b.deliveryStatus === 'Delivered').length;
+
+    return {
+      totalBills: activeBills.length,
+      grossSales,
+      totalSale,
+      totalBalance,
+      totalDelivery,
+      totalCustomer: uniqueCustomerCount,
+      totalDeliveryCount,
+      payModeSplit: { cashTotal, upiTotal, cardTotal, onlineTotal, bankTotal },
+      lensTypeCounts,
+      frameBrandCounts
+    };
+  }, [filteredBills, bills, hasDateSelected, searchQuery]);
+
+  // Quick Date Preset Handlers
+  const handleSetToday = () => {
+    const today = getTodayStr();
+    setStartDate(today);
+    setEndDate(today);
+  };
+
+  const handleSetThisMonth = () => {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const firstDay = `${year}-${month}-01`;
+    const todayStr = getTodayStr();
+    setStartDate(firstDay);
+    setEndDate(todayStr);
+  };
+
+  const handleSetAllTime = () => {
+    if (bills.length > 0) {
+      const dates = bills.map(b => getBillDateStr(b)).filter(Boolean).sort();
+      if (dates.length > 0) {
+        setStartDate(dates[0]);
+        setEndDate(getTodayStr());
+        return;
+      }
+    }
+    setStartDate('2020-01-01');
+    setEndDate(getTodayStr());
+  };
+
+  const handleResetFilter = () => {
+    const today = getTodayStr();
+    setStartDate(today);
+    setEndDate(today);
+    setSearchQuery('');
+    setSelectedBranch('all');
+  };
+
+  // Helper for formatting Prescription Summary string in Excel
+  const formatRxSummary = (rx) => {
+    if (!rx) return 'N/A';
+    const rSph = rx.rightEye?.sph || rx.rightEye?.dv?.sphere || '-';
+    const rCyl = rx.rightEye?.cyl || rx.rightEye?.dv?.cylinder || '-';
+    const rAxi = rx.rightEye?.axis || rx.rightEye?.dv?.axis || '-';
+    const rAdd = rx.rightEye?.add || '-';
+    const rVa = rx.rightEye?.va || '-';
+
+    const lSph = rx.leftEye?.sph || rx.leftEye?.dv?.sphere || '-';
+    const lCyl = rx.leftEye?.cyl || rx.leftEye?.dv?.cylinder || '-';
+    const lAxi = rx.leftEye?.axis || rx.leftEye?.dv?.axis || '-';
+    const lAdd = rx.leftEye?.add || '-';
+    const lVa = rx.leftEye?.va || '-';
+
+    const hasAny = [rSph, rCyl, rAxi, rAdd, rVa, lSph, lCyl, lAxi, lAdd, lVa].some(
+      v => v && v !== '-' && String(v).trim() !== ''
+    );
+    if (!hasAny) return 'No Rx';
+
+    const addR = (rAdd && rAdd !== '-') ? ` ADD ${rAdd}` : '';
+    const addL = (lAdd && lAdd !== '-') ? ` ADD ${lAdd}` : '';
+    const vaR = (rVa && rVa !== '-') ? ` VA ${rVa}` : '';
+    const vaL = (lVa && lVa !== '-') ? ` VA ${lVa}` : '';
+
+    return `RE: SPH ${rSph}, CYL ${rCyl}, AXIS ${rAxi}${addR}${vaR} | LE: SPH ${lSph}, CYL ${lCyl}, AXIS ${lAxi}${addL}${vaL}`;
+  };
+
+  // Render separate RE / LE Prescription Box inside report table
+  const renderPrescriptionBox = (rx) => {
+    if (!rx) {
+      return (
+        <span className="opacity-40 italic text-[10px] font-sans">
+          No Rx
+        </span>
+      );
+    }
+
+    const rSph = rx.rightEye?.sph || rx.rightEye?.dv?.sphere || '';
+    const rCyl = rx.rightEye?.cyl || rx.rightEye?.dv?.cylinder || '';
+    const rAxi = rx.rightEye?.axis || rx.rightEye?.dv?.axis || '';
+    const rAdd = rx.rightEye?.add || '';
+    const rVa = rx.rightEye?.va || '';
+
+    const lSph = rx.leftEye?.sph || rx.leftEye?.dv?.sphere || '';
+    const lCyl = rx.leftEye?.cyl || rx.leftEye?.dv?.cylinder || '';
+    const lAxi = rx.leftEye?.axis || rx.leftEye?.dv?.axis || '';
+    const lAdd = rx.leftEye?.add || '';
+    const lVa = rx.leftEye?.va || '';
+
+    const hasAnyPower = [rSph, rCyl, rAxi, rAdd, rVa, lSph, lCyl, lAxi, lAdd, lVa].some(
+      v => v && v !== '-' && String(v).trim() !== ''
+    );
+
+    if (!hasAnyPower) {
+      return (
+        <span className="opacity-40 italic text-[10px] font-sans">
+          No Rx
+        </span>
+      );
+    }
+
+    return (
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className={`rounded-lg border overflow-hidden text-[10px] font-mono shadow-xs min-w-[240px] max-w-[290px] my-0.5 ${isDarkMode
+          ? 'bg-slate-950/85 border-slate-700/70'
+          : 'bg-white/95 border-slate-200 shadow-2xs'
+          }`}
+      >
+        {/* Prescription Header */}
+        <div className={`grid grid-cols-6 gap-1 px-2 py-0.5 text-[9px] font-extrabold uppercase tracking-wider text-center border-b ${isDarkMode
+          ? 'bg-slate-900/90 border-slate-800 text-slate-400'
+          : 'bg-slate-100/90 border-slate-200 text-slate-600'
+          }`}>
+          <span className="text-left font-sans font-bold">EYE</span>
+          <span>SPH</span>
+          <span>CYL</span>
+          <span>AXIS</span>
+          <span>ADD</span>
+          <span>V/A</span>
+        </div>
+
+        {/* Right Eye RE Box / Row */}
+        <div className={`grid grid-cols-6 gap-1 px-2 py-1 items-center text-center border-b ${isDarkMode
+          ? 'border-slate-800/70 bg-rose-950/25 text-slate-200'
+          : 'border-slate-100 bg-rose-50/70 text-slate-800'
+          }`}>
+          <span className="text-left font-black text-rose-500 font-sans text-[10px] flex items-center gap-1">
+            <span className="w-1.5 h-1.5 rounded-full bg-rose-500 shrink-0"></span>
+            RE
+          </span>
+          <span className="font-bold text-sky-500">{rSph || '-'}</span>
+          <span className="font-semibold">{rCyl || '-'}</span>
+          <span className="font-semibold">{rAxi || '-'}</span>
+          <span className="font-bold text-amber-500">{rAdd || '-'}</span>
+          <span className="opacity-70 text-[9px] truncate" title={rVa || ''}>{rVa || '-'}</span>
+        </div>
+
+        {/* Left Eye LE Box / Row */}
+        <div className={`grid grid-cols-6 gap-1 px-2 py-1 items-center text-center ${isDarkMode
+          ? 'bg-sky-950/25 text-slate-200'
+          : 'bg-sky-50/70 text-slate-800'
+          }`}>
+          <span className="text-left font-black text-sky-500 font-sans text-[10px] flex items-center gap-1">
+            <span className="w-1.5 h-1.5 rounded-full bg-sky-500 shrink-0"></span>
+            LE
+          </span>
+          <span className="font-bold text-sky-500">{lSph || '-'}</span>
+          <span className="font-semibold">{lCyl || '-'}</span>
+          <span className="font-semibold">{lAxi || '-'}</span>
+          <span className="font-bold text-amber-500">{lAdd || '-'}</span>
+          <span className="opacity-70 text-[9px] truncate" title={lVa || ''}>{lVa || '-'}</span>
+        </div>
+
+        {/* Optional PD / RI details */}
+        {(rx.pd || rx.ri) && (
+          <div className={`flex items-center justify-between px-2 py-0.5 text-[9px] border-t font-sans ${isDarkMode ? 'border-slate-800 bg-slate-900/60 text-slate-400' : 'border-slate-100 bg-slate-50 text-slate-500'
+            }`}>
+            {rx.pd && <span><strong>PD:</strong> {rx.pd} mm</span>}
+            {rx.ri && <span><strong>R.I:</strong> {rx.ri}</span>}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // Export filtered bills directly to Excel (.xlsx) including full Prescription Details
+  const handleExportExcel = async () => {
+    if (!hasDateSelected) {
+      alert('Please select a date or date range first to export reports.');
+      return;
+    }
+    if (filteredBills.length === 0) {
+      alert('No entries available to export for the selected date range.');
+      return;
+    }
+
+    const XLSX = await import('xlsx');
+
+    const excelData = filteredBills.map(b => ({
+      'Bill No': formatBillNo(b.billNo),
+      'Branch': b.branch || 'Optics India',
+      'Date': b.date ? new Date(b.date).toLocaleDateString('en-GB') : '',
+      'MRD No': b.customer?.mrdNo || '',
+      'Customer Name': b.customer?.name || '',
+      'Phone': b.customer?.phone || '',
+      'Doctor / Prescribed By': b.customer?.drName || '',
+      'Order Taken By': b.customer?.orderTakenBy || '',
+      // Complete Prescription Summary
+      'Prescription (Lens Powers)': formatRxSummary(b.prescription),
+      // Detailed RE Parameters
+      'RE SPH': b.prescription?.rightEye?.sph || b.prescription?.rightEye?.dv?.sphere || '',
+      'RE CYL': b.prescription?.rightEye?.cyl || b.prescription?.rightEye?.dv?.cylinder || '',
+      'RE AXIS': b.prescription?.rightEye?.axis || b.prescription?.rightEye?.dv?.axis || '',
+      'RE ADD': b.prescription?.rightEye?.add || '',
+      'RE VA': b.prescription?.rightEye?.va || '',
+      // Detailed LE Parameters
+      'LE SPH': b.prescription?.leftEye?.sph || b.prescription?.leftEye?.dv?.sphere || '',
+      'LE CYL': b.prescription?.leftEye?.cyl || b.prescription?.leftEye?.dv?.cylinder || '',
+      'LE AXIS': b.prescription?.leftEye?.axis || b.prescription?.leftEye?.dv?.axis || '',
+      'LE ADD': b.prescription?.leftEye?.add || '',
+      'LE VA': b.prescription?.leftEye?.va || '',
+      'PD (mm)': b.prescription?.pd || '',
+      'R.I': b.prescription?.ri || '',
+      // Product & Financial Details
+      'Lens Type': b.lens?.type || '',
+      'Lens Brand': b.lens?.brand || '',
+      'Frame Brand': b.frame?.brand || '',
+      'Total Amount (₹)': Number(b.totalAmount || 0),
+      'Discount (₹)': Number(b.discountAmount || 0),
+      'Net Amount (₹)': Number(b.netAmount || 0),
+      'Advance (₹)': Number(b.advanceAmount || 0),
+      'Balance (₹)': Number(b.balanceAmount || 0),
+      'Delivery Status': b.deliveryStatus || 'Pending',
+      'Delivery Date': b.deliveryDate ? new Date(b.deliveryDate).toLocaleDateString('en-GB') : '',
+      'Payment Mode': b.payMode || 'CASH'
+    }));
+
+    const worksheet = XLSX.utils.json_to_sheet(excelData);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Sales Entries');
+
+    // Auto-fit column widths
+    const colWidths = Object.keys(excelData[0] || {}).map(key => ({
+      wch: Math.max(key.length + 3, 14)
+    }));
+    worksheet['!cols'] = colWidths;
+
+    const startLabel = startDate || 'all';
+    const endLabel = endDate || 'all';
+    const filename = `Optics_India_Report_${startLabel}_to_${endLabel}.xlsx`;
+    XLSX.writeFile(workbook, filename);
+  };
+
+  const panelClass = isDarkMode ? 'glass-panel-dark' : 'glass-panel-light';
+  const labelClass = isDarkMode ? 'text-slate-300' : 'text-[#0B2D5B]/80';
+  const inputClass = isDarkMode
+    ? 'bg-[#061833] border-[#0B2D5B] text-slate-100 focus:border-[#D4AF37]'
+    : 'bg-white border-[#0B2D5B]/20 text-[#0B2D5B] focus:border-[#D4AF37]';
+
+  const todayStr = getTodayStr();
+  const now = new Date();
+  const firstDayOfMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+  const isTodaySelected = startDate === todayStr && endDate === todayStr;
+  const isThisMonthSelected = startDate === firstDayOfMonth && endDate === todayStr;
+  const isChangedFromToday = !isTodaySelected || Boolean(searchQuery) || selectedBranch !== 'all';
+
+  return (
+    <div className="space-y-4 pb-12 animate-in fade-in duration-300">
+      {/* Top Banner & 6 KPI Boxes */}
+      <div className={`${panelClass} p-4 sm:p-5 rounded-2xl sm:rounded-3xl`}>
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[#0B2D5B]/15 dark:border-[#D4AF37]/20 pb-3 mb-4">
+          <div>
+            <h1 className="text-xl sm:text-2xl font-black text-[#0B2D5B] dark:text-[#D4AF37] flex items-center gap-2">
+              <TrendingUp className="w-6 h-6 text-[#D4AF37]" /> Sales & Revenue Reports Dashboard
+            </h1>
+            <p className={`text-xs font-semibold mt-0.5 ${labelClass}`}>
+              Comprehensive Financial Metrics, Payment Mode Breakdowns, and Inventory Analytics
+            </p>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-mono font-bold px-3 py-1 rounded-xl bg-[#0B2D5B]/10 dark:bg-[#0B2D5B]/50 border border-[#0B2D5B]/20 dark:border-[#D4AF37]/30 text-[#0B2D5B] dark:text-[#D4AF37]">
+              Admin Exclusive
+            </span>
+          </div>
+        </div>
+
+        {/* 6 KPI Cards: Gross Sales, Total Sale, Total Balance, Total Delivery, Total Delivery Count, Total Customer */}
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 text-xs">
+          {/* Card 1: Gross Sales = Total Sale + Delivery Amount */}
+          <div className={`p-4 rounded-2xl border transition-all shadow-xs ${isDarkMode ? 'bg-[#061833]/90 border-[#0B2D5B]/60' : 'bg-white/90 border-[#0B2D5B]/15'
+            }`}>
+            <div className="flex items-center justify-between text-[#0B2D5B]/80 dark:text-slate-300 font-bold mb-1">
+              <span>Gross Sales</span>
+              <DollarSign className="w-4 h-4 text-[#D4AF37]" />
+            </div>
+            <div className="text-xl sm:text-2xl font-black font-mono text-[#0B2D5B] dark:text-[#D4AF37]">
+              ₹ {summaryMetrics.grossSales.toFixed(2)}
+            </div>
+            <div className="text-[10px] opacity-70 font-semibold mt-0.5">
+              total sale + delivery amount
+            </div>
+          </div>
+
+          {/* Card 2: Total Sale */}
+          <div className={`p-4 rounded-2xl border transition-all shadow-xs ${isDarkMode ? 'bg-[#0B2D5B]/30 border-[#D4AF37]/30' : 'bg-[#0B2D5B]/5 border-[#0B2D5B]/20'
+            }`}>
+            <div className="flex items-center justify-between text-[#0B2D5B] dark:text-[#D4AF37] font-bold mb-1">
+              <span>Total Sale</span>
+              <ShoppingBag className="w-4 h-4 text-[#D4AF37]" />
+            </div>
+            <div className="text-xl sm:text-2xl font-black font-mono text-[#0B2D5B] dark:text-[#D4AF37]">
+              ₹ {summaryMetrics.totalSale.toFixed(2)}
+            </div>
+            <div className="text-[10px] opacity-70 font-semibold mt-0.5 text-[#0B2D5B]/80 dark:text-[#D4AF37]/80">
+              Total sale amount
+            </div>
+          </div>
+
+          {/* Card 3: Total Balance */}
+          <div className={`p-4 rounded-2xl border transition-all shadow-xs ${isDarkMode ? 'bg-[#061833]/90 border-[#0B2D5B]/60' : 'bg-slate-50 border-slate-200'
+            }`}>
+            <div className="flex items-center justify-between text-[#0B2D5B] dark:text-amber-300 font-bold mb-1">
+              <span>Total Balance</span>
+              <AlertCircle className="w-4 h-4 text-amber-500" />
+            </div>
+            <div className="text-xl sm:text-2xl font-black font-mono text-amber-600 dark:text-amber-400">
+              ₹ {summaryMetrics.totalBalance.toFixed(2)}
+            </div>
+            <div className="text-[10px] opacity-70 font-semibold mt-0.5">
+              Pending balance amount
+            </div>
+          </div>
+
+          {/* Card 4: Total Delivery Amount */}
+          <div className={`p-4 rounded-2xl border transition-all shadow-xs ${isDarkMode ? 'bg-[#0B2D5B]/30 border-[#D4AF37]/30' : 'bg-[#0B2D5B]/5 border-[#0B2D5B]/20'
+            }`}>
+            <div className="flex items-center justify-between text-[#0B2D5B] dark:text-[#D4AF37] font-bold mb-1">
+              <span>Total Delivery</span>
+              <Truck className="w-4 h-4 text-[#D4AF37]" />
+            </div>
+            <div className="text-xl sm:text-2xl font-black font-mono text-[#0B2D5B] dark:text-[#D4AF37]">
+              ₹ {summaryMetrics.totalDelivery.toFixed(2)}
+            </div>
+            <div className="text-[10px] opacity-70 font-semibold mt-0.5 text-[#0B2D5B]/80 dark:text-[#D4AF37]/80">
+              Delivery amount
+            </div>
+          </div>
+
+          {/* Card 5: Total Delivery Count */}
+          <div className={`p-4 rounded-2xl border transition-all shadow-xs ${isDarkMode ? 'bg-emerald-950/40 border-emerald-800/40' : 'bg-emerald-50/80 border-emerald-200'
+            }`}>
+            <div className="flex items-center justify-between text-emerald-800 dark:text-emerald-400 font-bold mb-1">
+              <span>Total Delivery Count</span>
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+            </div>
+            <div className="text-xl sm:text-2xl font-black font-mono text-emerald-900 dark:text-emerald-300">
+              {summaryMetrics.totalDeliveryCount}
+            </div>
+            <div className="text-[10px] opacity-70 font-semibold mt-0.5 text-emerald-700 dark:text-emerald-400/80">
+              {isTodaySelected ? 'Orders delivered today' : hasDateSelected ? 'Delivered in period' : 'Orders delivered'}
+            </div>
+          </div>
+
+          {/* Card 6: Total Customer */}
+          <div className={`p-4 rounded-2xl border transition-all shadow-xs ${isDarkMode ? 'bg-[#061833]/90 border-[#0B2D5B]/60' : 'bg-white/90 border-[#0B2D5B]/15'
+            }`}>
+            <div className="flex items-center justify-between text-[#0B2D5B]/80 dark:text-slate-300 font-bold mb-1">
+              <span>Total Customer</span>
+              <Users className="w-4 h-4 text-[#D4AF37]" />
+            </div>
+            <div className="text-xl sm:text-2xl font-black font-mono text-[#0B2D5B] dark:text-[#D4AF37]">
+              {summaryMetrics.totalCustomer}
+            </div>
+            <div className="text-[10px] opacity-70 font-semibold mt-0.5">
+              {isTodaySelected ? 'Unique customers today' : hasDateSelected ? 'Customers in period' : 'Unique customer profiles'}
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+      {/* Date Filter & Filtered Entries Section with Excel Download */}
+      <div className={`${panelClass} p-4 sm:p-5 rounded-2xl sm:rounded-3xl space-y-4`}>
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 border-b border-slate-400/20 pb-3">
+          <div>
+            <h2 className="text-base font-bold flex items-center gap-2">
+              <Calendar className="w-4 h-4 text-[#D4AF37]" /> Date Range Filter & Sales Entries
+            </h2>
+            <p className="text-xs opacity-70 mt-0.5">
+              Filter billing entries between dates and export directly to Excel with full Prescription (Lens Powers)
+            </p>
+          </div>
+
+          {/* Download Excel Button */}
+          <button
+            onClick={handleExportExcel}
+            disabled={!hasDateSelected || filteredBills.length === 0}
+            className={`flex items-center justify-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all shrink-0 ${hasDateSelected && filteredBills.length > 0
+              ? 'bg-[#0B2D5B] hover:bg-[#143E77] border border-[#D4AF37]/40 text-[#D4AF37] active:scale-95 shadow-md shadow-[#0B2D5B]/30 cursor-pointer'
+              : 'bg-slate-400/20 text-slate-400 cursor-not-allowed border border-slate-400/20 opacity-60'
+              }`}
+            title={hasDateSelected && filteredBills.length > 0 ? "Export filtered records including Prescription to Microsoft Excel (.xlsx)" : "Select a date to view and export records"}
+          >
+            <FileSpreadsheet className="w-4 h-4 text-[#D4AF37]" />
+            <span>Download Excel</span>
+          </button>
+        </div>
+
+        {/* Date Filter Controls Bar */}
+        <div className={`p-3 sm:p-4 rounded-xl sm:rounded-2xl border ${isDarkMode ? 'bg-slate-950/60 border-slate-800' : 'bg-slate-50 border-slate-200'
+          }`}>
+          <div className="flex flex-wrap items-center gap-3">
+            {/* Start Date */}
+            <div className="flex items-center gap-2">
+              <label className="text-xs font-bold opacity-80 whitespace-nowrap">Start Date:</label>
+              <input
+                type="date"
+                value={startDate}
+                onChange={(e) => setStartDate(e.target.value)}
+                className={`text-xs px-2.5 py-1.5 rounded-lg border outline-none font-mono ${inputClass}`}
+              />
+            </div>
+
+            {/* End Date */}
+            <div className="flex items-center gap-2">
+              <label className="text-xs font-bold opacity-80 whitespace-nowrap">End Date:</label>
+              <input
+                type="date"
+                value={endDate}
+                onChange={(e) => setEndDate(e.target.value)}
+                className={`text-xs px-2.5 py-1.5 rounded-lg border outline-none font-mono ${inputClass}`}
+              />
+            </div>
+
+            {/* Quick Filter Buttons */}
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <button
+                type="button"
+                onClick={handleSetToday}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition-all cursor-pointer ${
+                  isTodaySelected
+                    ? 'bg-[#0B2D5B] text-[#D4AF37] border-[#D4AF37]/60 shadow-xs ring-1 ring-[#D4AF37]/30'
+                    : isDarkMode
+                      ? 'bg-slate-900 border-slate-700 hover:bg-slate-800 text-slate-300'
+                      : 'bg-white border-slate-300 hover:bg-slate-100 text-slate-700 shadow-2xs'
+                }`}
+                title="Filter by Today's sales and metrics"
+              >
+                Today
+              </button>
+              <button
+                type="button"
+                onClick={handleSetThisMonth}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition-all cursor-pointer ${
+                  isThisMonthSelected
+                    ? 'bg-[#0B2D5B] text-[#D4AF37] border-[#D4AF37]/60 shadow-xs ring-1 ring-[#D4AF37]/30'
+                    : isDarkMode
+                      ? 'bg-slate-900 border-slate-700 hover:bg-slate-800 text-slate-300'
+                      : 'bg-white border-slate-300 hover:bg-slate-100 text-slate-700 shadow-2xs'
+                }`}
+                title="Filter by current month sales and metrics"
+              >
+                This Month
+              </button>
+              <button
+                type="button"
+                onClick={handleSetAllTime}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition-all cursor-pointer ${
+                  isDarkMode
+                    ? 'bg-slate-900 border-slate-700 hover:bg-slate-800 text-slate-300'
+                    : 'bg-white border-slate-300 hover:bg-slate-100 text-slate-700 shadow-2xs'
+                }`}
+                title="View all records and all-time KPI metrics"
+              >
+                All Time
+              </button>
+
+              {isChangedFromToday && (
+                <button
+                  type="button"
+                  onClick={handleResetFilter}
+                  className="px-2.5 py-1.5 rounded-lg text-xs font-bold border border-rose-500/40 bg-rose-500/10 text-rose-500 hover:bg-rose-500/20 transition-all cursor-pointer flex items-center gap-1"
+                  title="Reset date filter back to Today"
+                >
+                  <RotateCcw className="w-3 h-3" /> Reset to Today
+                </button>
+              )}
+            </div>
+
+            {/* Branch Filter Selector */}
+            <div className="flex items-center gap-1.5">
+              <label className="text-xs font-bold opacity-80 whitespace-nowrap flex items-center gap-1">
+                <Building2 className="w-3.5 h-3.5 text-[#D4AF37]" /> Branch:
+              </label>
+              <select
+                value={selectedBranch}
+                onChange={(e) => setSelectedBranch(e.target.value)}
+                className={`text-xs px-2.5 py-1.5 rounded-lg border outline-none font-bold cursor-pointer transition-all ${
+                  selectedBranch !== 'all'
+                    ? isDarkMode
+                      ? 'bg-[#0B2D5B] text-[#D4AF37] border-[#D4AF37]/60 shadow-xs ring-1 ring-[#D4AF37]/30'
+                      : 'bg-amber-50 text-[#0B2D5B] border-[#D4AF37] shadow-xs ring-1 ring-[#D4AF37]/40'
+                    : isDarkMode
+                      ? 'bg-[#061833] border-[#0B2D5B] text-slate-100 focus:border-[#D4AF37]'
+                      : 'bg-white border-slate-300 text-slate-800 focus:border-[#D4AF37] shadow-2xs'
+                }`}
+                title="Filter reports by store branch"
+              >
+                <option 
+                  value="all" 
+                  className={isDarkMode ? 'bg-slate-900 text-slate-100' : 'bg-white text-slate-900'}
+                  style={{ backgroundColor: isDarkMode ? '#0f172a' : '#ffffff', color: isDarkMode ? '#f8fafc' : '#0f172a' }}
+                >
+                  All Branches ({bills.length})
+                </option>
+                {branches.map(b => {
+                  const count = bills.filter(bill => (bill.branch || 'Optics India').toLowerCase() === b.toLowerCase()).length;
+                  return (
+                    <option 
+                      key={b} 
+                      value={b} 
+                      className={isDarkMode ? 'bg-slate-900 text-slate-100' : 'bg-white text-slate-900'}
+                      style={{ backgroundColor: isDarkMode ? '#0f172a' : '#ffffff', color: isDarkMode ? '#f8fafc' : '#0f172a' }}
+                    >
+                      {b} ({count})
+                    </option>
+                  );
+                })}
+              </select>
+            </div>
+
+            {/* Search Input in table */}
+            <div className="flex-1 min-w-[200px] flex items-center gap-1.5">
+              <div className="relative w-full">
+                <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 opacity-50" />
+                <input
+                  type="text"
+                  placeholder="Search by Bill No, Name, Phone..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className={`w-full text-xs pl-8 pr-3 py-1.5 rounded-lg border outline-none ${inputClass}`}
+                />
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-2 text-[11px] opacity-70 font-semibold flex items-center justify-between">
+            <span>
+              {hasDateSelected ? (
+                <>Showing <strong>{filteredBills.length}</strong> matching billing entries</>
+              ) : (
+                <span className="text-amber-500 font-bold flex items-center gap-1">
+                  <AlertCircle className="w-3.5 h-3.5" /> Please select a date or date range to display entries
+                </span>
+              )}
+            </span>
+            {hasDateSelected && (
+              <span className="font-mono text-blue-800 dark:text-sky-400 font-bold">
+                Filtered: {startDate || 'Beginning'} → {endDate || 'Today'}
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* Filtered Entries Table with Prescription (Lens Powers) */}
+        <div className={`overflow-x-auto rounded-xl border max-h-[440px] overflow-y-auto ${isDarkMode ? 'bg-slate-950/60 border-slate-800' : 'bg-white border-slate-200'
+          }`}>
+          <table className="w-full text-left text-xs min-w-[1100px]">
+            <thead className={`border-b font-extrabold sticky top-0 backdrop-blur-xl z-10 ${isDarkMode ? 'bg-slate-900/95 border-slate-800 text-slate-300' : 'bg-slate-100/95 border-slate-200 text-slate-700'
+              }`}>
+              <tr>
+                <th className="p-2.5 border-r border-slate-400/20 text-center">Bill No.</th>
+                <th className="p-2.5 border-r border-slate-400/20">Date</th>
+                <th className="p-2.5 border-r border-slate-400/20">MRD No</th>
+                <th className="p-2.5 border-r border-slate-400/20">Customer Name</th>
+                <th className="p-2.5 border-r border-slate-400/20">Phone</th>
+                <th className="p-2.5 border-r border-slate-400/20 min-w-[260px]">Prescription (Lens Powers)</th>
+                <th className="p-2.5 border-r border-slate-400/20 text-right">Total (₹)</th>
+                <th className="p-2.5 border-r border-slate-400/20 text-right">Discount (₹)</th>
+                <th className="p-2.5 border-r border-slate-400/20 text-right">Net Amt (₹)</th>
+                <th className="p-2.5 border-r border-slate-400/20 text-right">Advance (₹)</th>
+                <th className="p-2.5 border-r border-slate-400/20 text-right">Balance (₹)</th>
+                <th className="p-2.5 border-r border-slate-400/20 text-center">Status</th>
+                <th className="p-2.5 text-center">Pay Mode</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-400/20 font-mono">
+              {!hasDateSelected ? (
+                <tr>
+                  <td colSpan="13" className="p-12 text-center font-sans">
+                    <div className="flex flex-col items-center justify-center gap-2 opacity-75">
+                      <Calendar className="w-8 h-8 text-blue-700 dark:text-sky-500 animate-pulse" />
+                      <p className="text-sm font-bold">No Date Selected</p>
+                      <p className="text-xs opacity-80">
+                        Date select panna mattumey entries show aagum. Please pick a <strong>Start Date</strong> / <strong>End Date</strong> or click <strong>Today</strong> / <strong>This Month</strong> above.
+                      </p>
+                    </div>
+                  </td>
+                </tr>
+              ) : filteredBills.length === 0 ? (
+                <tr>
+                  <td colSpan="13" className="p-8 text-center opacity-70 font-sans">
+                    <p className="font-semibold text-sm">
+                      {isTodaySelected ? 'No billing entries recorded for Today yet.' : 'No billing entries found for the selected date range or search query.'}
+                    </p>
+                    {isTodaySelected && (
+                      <p className="text-xs opacity-75 mt-1">
+                        Sales recorded today will automatically appear here. Use <strong>This Month</strong> or <strong>All Time</strong> above to view previous records.
+                      </p>
+                    )}
+                  </td>
+                </tr>
+              ) : (
+                filteredBills.map((b) => {
+                  const formattedDate = b.date
+                    ? new Date(b.date).toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' }).replace(/\//g, '-')
+                    : 'N/A';
+                  const isDelivered = b.deliveryStatus === 'Delivered';
+
+                  return (
+                    <tr
+                      key={b._id || b.billNo}
+                      className={`transition-all ${isDarkMode ? 'hover:bg-slate-900/60 text-slate-300' : 'hover:bg-slate-50 text-slate-800'
+                        }`}
+                    >
+                      <td className="p-2.5 border-r border-slate-400/20 text-center font-bold text-amber-500">
+                        <div>{formatBillNo(b.billNo)}</div>
+                        <span className="text-[9px] font-bold px-1.5 py-0.2 rounded bg-sky-500/10 text-sky-600 dark:text-sky-400 border border-sky-500/20 inline-block mt-0.5">
+                          {b.branch || 'Optics India'}
+                        </span>
+                      </td>
+                      <td className="p-2.5 border-r border-slate-400/20 text-[11px]">
+                        {formattedDate}
+                      </td>
+                      <td className="p-2.5 border-r border-slate-400/20 text-[11px] opacity-70">
+                        {b.customer?.mrdNo || '-'}
+                      </td>
+                      <td className="p-2.5 border-r border-slate-400/20 font-sans font-bold">
+                        {b.customer?.name || '-'}
+                      </td>
+                      <td className="p-2.5 border-r border-slate-400/20 text-amber-500 font-semibold">
+                        {b.customer?.phone || '-'}
+                      </td>
+                      {/* Prescription (Lens Powers) RE & LE Box */}
+                      <td className="p-2.5 border-r border-slate-400/20">
+                        {renderPrescriptionBox(b.prescription)}
+                      </td>
+                      <td className="p-2.5 border-r border-slate-400/20 text-right">
+                        {Number(b.totalAmount || 0).toFixed(2)}
+                      </td>
+                      <td className="p-2.5 border-r border-slate-400/20 text-right text-amber-500">
+                        {Number(b.discountAmount || 0).toFixed(2)}
+                      </td>
+                      <td className="p-2.5 border-r border-slate-400/20 text-right font-bold text-blue-800 dark:text-sky-400">
+                        {Number(b.netAmount || 0).toFixed(2)}
+                      </td>
+                      <td className="p-2.5 border-r border-slate-400/20 text-right text-emerald-500">
+                        {Number(b.advanceAmount || 0).toFixed(2)}
+                      </td>
+                      <td className="p-2.5 border-r border-slate-400/20 text-right font-bold text-rose-500">
+                        {Number(b.balanceAmount || 0).toFixed(2)}
+                      </td>
+                      <td className="p-2.5 border-r border-slate-400/20 text-center font-sans">
+                        <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold ${isDelivered
+                          ? 'bg-emerald-500/15 text-emerald-500 border border-emerald-500/30'
+                          : 'bg-amber-500/15 text-amber-500 border border-amber-500/30'
+                          }`}>
+                          {isDelivered ? <CheckCircle2 className="w-3 h-3" /> : <Clock className="w-3 h-3" />}
+                          {b.deliveryStatus || 'Pending'}
+                        </span>
+                      </td>
+                      <td className="p-2.5 text-center font-sans">
+                        <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-slate-500/15 text-slate-400">
+                          {b.payMode || 'CASH'}
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Payment Modes & Inventory Breakdown Grid (Preserved intact) */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        {/* Payment Mode Revenue Split */}
+        <div className={`${panelClass} p-4 sm:p-5 rounded-2xl sm:rounded-3xl space-y-3`}>
+          <h2 className="text-sm sm:text-base font-bold flex items-center gap-2 border-b border-slate-400/20 pb-2">
+            <PieChart className="w-4 h-4 text-sky-500" /> Payment Mode Revenue Split
+          </h2>
+
+          <div className="space-y-2.5 text-xs font-semibold">
+            <div className="flex items-center justify-between p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/20">
+              <span className="font-bold text-emerald-500">💵 CASH Payments:</span>
+              <span className="font-mono font-bold text-sm">₹ {summaryMetrics.payModeSplit.cashTotal.toFixed(2)}</span>
+            </div>
+
+            <div className="flex items-center justify-between p-2.5 rounded-xl bg-sky-500/10 border border-sky-500/20">
+              <span className="font-bold text-sky-500">📱 UPI Payments (GPay/PhonePe):</span>
+              <span className="font-mono font-bold text-sm">₹ {summaryMetrics.payModeSplit.upiTotal.toFixed(2)}</span>
+            </div>
+
+            <div className="flex items-center justify-between p-2.5 rounded-xl bg-purple-500/10 border border-purple-500/20">
+              <span className="font-bold text-purple-500">💳 CARD Payments:</span>
+              <span className="font-mono font-bold text-sm">₹ {summaryMetrics.payModeSplit.cardTotal.toFixed(2)}</span>
+            </div>
+
+            <div className="flex items-center justify-between p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/20">
+              <span className="font-bold text-amber-500">🌐 ONLINE / Net Banking:</span>
+              <span className="font-mono font-bold text-sm">₹ {summaryMetrics.payModeSplit.onlineTotal.toFixed(2)}</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Top Product Category Analytics */}
+        <div className={`${panelClass} p-4 sm:p-5 rounded-2xl sm:rounded-3xl space-y-3`}>
+          <h2 className="text-sm sm:text-base font-bold flex items-center gap-2 border-b border-slate-400/20 pb-2">
+            <BarChart3 className="w-4 h-4 text-amber-500" /> Best-Selling Lens & Frame Inventory
+          </h2>
+
+          <div className="grid grid-cols-2 gap-3 text-xs">
+            <div>
+              <h3 className="font-bold opacity-80 mb-2 text-sky-400">Popular Lens Designs:</h3>
+              <div className="space-y-1 font-mono">
+                {Object.entries(summaryMetrics.lensTypeCounts).length === 0 ? (
+                  <div className="p-3 text-center text-[11px] opacity-40 font-sans italic">
+                    No lens sales in selected period
+                  </div>
+                ) : (
+                  Object.entries(summaryMetrics.lensTypeCounts).map(([type, count]) => (
+                    <div key={type} className="flex justify-between p-1.5 rounded-lg bg-slate-500/10">
+                      <span className="truncate pr-1">{type || 'SV'}</span>
+                      <strong className="text-sky-400">{count} sold</strong>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+
+            <div>
+              <h3 className="font-bold opacity-80 mb-2 text-amber-400">Top Frame Brands:</h3>
+              <div className="space-y-1 font-mono">
+                {Object.entries(summaryMetrics.frameBrandCounts).length === 0 ? (
+                  <div className="p-3 text-center text-[11px] opacity-40 font-sans italic">
+                    No frame sales in selected period
+                  </div>
+                ) : (
+                  Object.entries(summaryMetrics.frameBrandCounts).map(([brand, count]) => (
+                    <div key={brand} className="flex justify-between p-1.5 rounded-lg bg-slate-500/10">
+                      <span className="truncate pr-1">{brand || 'Regular'}</span>
+                      <strong className="text-amber-400">{count} sold</strong>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
