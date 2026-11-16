@@ -8,7 +8,7 @@ export default defineConfig({
     react(),
     tailwindcss()
   ],
-  base: "/optical-frontend/",
+  base: "/",
   build: {
     chunkSizeWarningLimit: 1600,
     rollupOptions: {
